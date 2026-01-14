@@ -13,41 +13,33 @@ interface GameProps {
 }
 
 const Game: React.FC<GameProps> = ({ localPlayer }) => {
-  // We use a Ref for remote players to avoid React render cycles for 60fps updates
   const remotePlayersRef = useRef<Record<string, WSPlayerState>>({});
   const [connected, setConnected] = useState(false);
   const movementRef = useRef({ x: 0, y: 0 });
 
   useEffect(() => {
-    // Connect to WebSocket Server (now Supabase Broadcast)
+    // Initialize WebSocket connection
     gameSocket.connect(localPlayer.id, localPlayer.username, localPlayer.color);
+    
+    // Optimistically set connected for UI, though socket.ts handles actual state
     setConnected(true);
 
     const unsubscribe = gameSocket.onMessage((data) => {
-      if (data.type === 'player_update') {
-        const player = data.payload as WSPlayerState;
-        // Update specific player in ref
-        if (player.id !== localPlayer.id) {
-          remotePlayersRef.current[player.id] = {
-            ...remotePlayersRef.current[player.id],
-            ...player
-          };
-        }
-      } else if (data.type === 'presence_sync') {
-        // payload is the presence state object { [id]: [metas], ... }
-        const presenceState = data.payload;
-        // We can use this to clean up players who left
-        // Simple logic: if a player ID is in remotePlayersRef but not in presenceState, remove them
-        // Note: presence keys are often the IDs if configured that way, or we scan values.
-        // In our socket.ts we set presence key to playerId
+      if (data.type === 'state') {
+        // The server sends the full state of all players
+        // payload: { players: { [id]: { ... } } }
+        const allPlayers = data.payload.players || {};
         
-        const onlineIds = new Set(Object.keys(presenceState));
-        
-        Object.keys(remotePlayersRef.current).forEach(id => {
-          if (!onlineIds.has(id)) {
-            delete remotePlayersRef.current[id];
+        // Filter out local player from the remote list
+        const remotes: Record<string, WSPlayerState> = {};
+        Object.keys(allPlayers).forEach((key) => {
+          if (key !== localPlayer.id) {
+            remotes[key] = allPlayers[key];
           }
         });
+
+        // Update the ref directly for performance (no re-renders)
+        remotePlayersRef.current = remotes;
       }
     });
 
@@ -59,7 +51,7 @@ const Game: React.FC<GameProps> = ({ localPlayer }) => {
 
   return (
     <div className="relative w-full h-full bg-black touch-none">
-      {/* 3D Scene */}
+      {/* 3D Scene - Always render even if connecting */}
       <Canvas shadows camera={{ position: [0, 5, 10], fov: 50 }}>
         <SoftShadows size={10} samples={10} focus={0.5} />
         <ambientLight intensity={0.5} />
@@ -92,10 +84,10 @@ const Game: React.FC<GameProps> = ({ localPlayer }) => {
       {/* 2D UI Overlay */}
       <HUD localPlayer={localPlayer} movementRef={movementRef} />
       
-      {/* Server Status Indicator */}
-      {!connected && (
-         <div className="absolute top-4 left-1/2 -translate-x-1/2 bg-red-600/80 text-white px-4 py-1 rounded-full text-sm font-bold animate-pulse">
-           Connecting to Game Server...
+      {/* Connection Status Indicator */}
+      {!gameSocket.isConnected && (
+         <div className="absolute top-4 left-1/2 -translate-x-1/2 bg-red-600/80 text-white px-4 py-1 rounded-full text-sm font-bold animate-pulse pointer-events-none">
+           Connecting to Server...
          </div>
       )}
     </div>

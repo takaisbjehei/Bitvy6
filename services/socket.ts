@@ -1,72 +1,81 @@
-import { supabase } from './supabase';
+import { WS_URL } from '../constants';
 import { WSPlayerState } from '../types';
 
 type MessageHandler = (data: any) => void;
 
 class GameSocket {
-  private channel: any = null;
+  private ws: WebSocket | null = null;
   private messageHandlers: Set<MessageHandler> = new Set();
   public isConnected: boolean = false;
-  private throttleTime = 50; // 50ms throttle
+  private throttleTime = 50;
   private lastSentTime = 0;
-  private userId: string | null = null;
+  private reconnectInterval: any = null;
 
   connect(playerId: string, username: string, color: string) {
-    if (this.channel) return;
-    this.userId = playerId;
+    if (this.ws && (this.ws.readyState === WebSocket.OPEN || this.ws.readyState === WebSocket.CONNECTING)) {
+      return;
+    }
 
-    this.channel = supabase.channel('game_world', {
-      config: {
-        broadcast: { self: false, ack: false },
-        presence: { key: playerId },
-      },
-    });
+    console.log(`Connecting to WebSocket at ${WS_URL}...`);
+    this.ws = new WebSocket(WS_URL);
 
-    this.channel
-      .on('broadcast', { event: 'player_update' }, (payload: any) => {
-        this.messageHandlers.forEach(handler => handler({
-          type: 'player_update',
-          payload: payload.payload
-        }));
-      })
-      .on('presence', { event: 'sync' }, () => {
-        const state = this.channel.presenceState();
-        // Convert presence state to list of IDs if needed, 
-        // but mostly we just need to know who is online to filter remotePlayers
-        this.messageHandlers.forEach(handler => handler({
-          type: 'presence_sync',
-          payload: state
-        }));
-      })
-      .subscribe(async (status: string) => {
-        if (status === 'SUBSCRIBED') {
-          console.log('Connected to Supabase Realtime');
-          this.isConnected = true;
-          
-          // Track presence
-          await this.channel.track({
-            online_at: new Date().toISOString(),
-            username,
-            color
-          });
+    this.ws.onopen = () => {
+      console.log('Connected to Game Server');
+      this.isConnected = true;
+      if (this.reconnectInterval) {
+        clearInterval(this.reconnectInterval);
+        this.reconnectInterval = null;
+      }
 
-          // Announce self immediately
-          this.sendMovement({ id: playerId, username, color, x: 0, y: 1, z: 0, rotation: 0 });
-        }
+      // Send initial handshake
+      this.send({
+        type: 'init',
+        payload: { id: playerId, username, color }
       });
+    };
+
+    this.ws.onmessage = (event) => {
+      try {
+        const data = JSON.parse(event.data);
+        this.messageHandlers.forEach(handler => handler(data));
+      } catch (e) {
+        console.error('Failed to parse WS message:', e);
+      }
+    };
+
+    this.ws.onclose = () => {
+      console.log('Disconnected from Game Server');
+      this.isConnected = false;
+      this.ws = null;
+      
+      // Attempt reconnect
+      if (!this.reconnectInterval) {
+        this.reconnectInterval = setInterval(() => {
+          console.log('Attempting to reconnect...');
+          this.connect(playerId, username, color);
+        }, 3000);
+      }
+    };
+
+    this.ws.onerror = (error) => {
+      console.error('WebSocket Error:', error);
+    };
   }
 
   sendMovement(state: Partial<WSPlayerState>) {
     const now = Date.now();
     if (now - this.lastSentTime < this.throttleTime) return;
     
-    if (this.channel && this.isConnected) {
-      this.channel.send({
-        type: 'broadcast',
-        event: 'player_update',
-        payload: { ...state, id: this.userId }
-      });
-      this.lastSentTime = now;
+    this.send({
+      type: 'move',
+      payload: state
+    });
+    this.lastSentTime = now;
+  }
+
+  private send(data: any) {
+    if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+      this.ws.send(JSON.stringify(data));
     }
   }
 
@@ -78,9 +87,10 @@ class GameSocket {
   }
 
   disconnect() {
-    if (this.channel) {
-      supabase.removeChannel(this.channel);
-      this.channel = null;
+    if (this.reconnectInterval) clearInterval(this.reconnectInterval);
+    if (this.ws) {
+      this.ws.close();
+      this.ws = null;
       this.isConnected = false;
     }
   }
