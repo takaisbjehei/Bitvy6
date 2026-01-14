@@ -1,0 +1,5 @@
+{
+  "name": "Supabase 3D MMO",
+  "description": "A real-time multiplayer 3D game using React, Three.js, Supabase, and WebSockets.",
+  "requestFramePermissions": []
+}
